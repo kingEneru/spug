@@ -15,6 +15,7 @@ https://docs.djangoproject.com/en/2.2/ref/settings/
 """
 
 from pathlib import Path
+from urllib.parse import quote
 import os
 import re
 
@@ -79,12 +80,28 @@ DATABASES = {
     }
 }
 
+# Redis 连接信息从环境变量读取，未设置时回退到本机默认的 127.0.0.1:6379（无认证）。
+# REDIS_USERNAME 用于 Redis 6+ 的 ACL 用户，只设置了密码时按 requirepass 方式认证。
+REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
+REDIS_PORT = int(os.environ.get('REDIS_PORT') or 6379)
+REDIS_USERNAME = os.environ.get('REDIS_USERNAME', '')
+REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', '')
+
+
+def _redis_url(db):
+    auth = ''
+    if REDIS_USERNAME or REDIS_PASSWORD:
+        # 账号密码里可能含有 @ : / 等字符，需要转义后才能放进 URL
+        auth = f"{quote(REDIS_USERNAME, safe='')}:{quote(REDIS_PASSWORD, safe='')}@"
+    return f'redis://{auth}{REDIS_HOST}:{REDIS_PORT}/{db}'
+
+
 CACHES = {
     "default": {
         # django_redis is required, the deploy/build/pipeline consoles use
         # get_redis_connection() to stream their output through redis lists.
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": "redis://127.0.0.1:6379/1",
+        "LOCATION": _redis_url(1),
         "KEY_PREFIX": "spug",
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
@@ -96,7 +113,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("127.0.0.1", 6379)],
+            "hosts": [_redis_url(0)],
             "prefix": "spug:channel",
             "capacity": 1000,
             "expiry": 120,
