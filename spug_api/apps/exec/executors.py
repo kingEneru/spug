@@ -4,7 +4,7 @@
 from django.conf import settings
 from django_redis import get_redis_connection
 from libs.utils import human_seconds_time, wrap_python_command
-from libs.ssh import SSH
+from libs.local_ssh import new_ssh
 from libs.locale import translate_console
 import threading
 import socket
@@ -20,7 +20,7 @@ def exec_worker_handler(job):
 class Job:
     def __init__(self, token, key, name, hostname, port, username, pkey, command, interpreter, params=None,
                  term=None, language='zh', record=False):
-        self.ssh = SSH(hostname, port, username, pkey, term=term)
+        self.ssh = new_ssh(hostname, port, username, pkey, term=term)
         self.key = key
         self.command = self._handle_command(command, interpreter)
         self.token = token

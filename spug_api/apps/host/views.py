@@ -14,6 +14,7 @@ from apps.schedule.models import Task
 from apps.monitor.models import Detection
 from apps.exec.models import ExecTemplate
 from libs.ssh import SSH, AuthenticationException
+from libs.local_ssh import LOCAL_HOSTNAME, is_local_hostname
 from libs.locale import translate, translate_choice
 from paramiko.ssh_exception import BadAuthenticationType
 from openpyxl import load_workbook, Workbook
@@ -52,6 +53,9 @@ class HostView(View):
             keep_pkey = form.pop('keep_pkey')
             if form.id and keep_pkey and not form.pkey:
                 form.pkey = Host.objects.filter(pk=form.id).values_list('pkey', flat=True).first()
+            # 本机主机可在 Spug 服务端执行任意命令，只允许管理员创建或改成本机
+            if is_local_hostname(form.hostname) and not request.user.is_supper:
+                return json_response(error=f'主机地址【{LOCAL_HOSTNAME}】表示 Spug 本机，仅管理员可添加')
             if not _do_host_verify(form):
                 return json_response('auth fail')
 
@@ -145,7 +149,8 @@ def post_import(request):
     for i, row in enumerate(ws.rows, start=1):
         if i == 1:  # 第1行是表头 略过
             continue
-        if not all([row[x].value for x in range(4)]):
+        if not all([row[x].value for x in range(4)]) or is_local_hostname(str(row[1].value)):
+            # 本机主机不支持通过导入创建
             summary['invalid'].append(i)
             summary['fail'] += 1
             continue
@@ -239,6 +244,8 @@ def batch_valid(request):
 
 def _do_host_verify(form):
     password = form.pop('password')
+    if is_local_hostname(form.hostname):
+        return True  # 本机不走 SSH，无需认证
     if form.pkey:
         try:
             with SSH(form.hostname, form.port, form.username, form.pkey) as ssh:

@@ -47,6 +47,10 @@ class Command(BaseCommand):
                     is_supper=options['s'],
                 )
                 self.echo_success('创建用户成功')
+                if options['s']:
+                    from apps.host.utils import ensure_local_host
+                    if ensure_local_host():
+                        self.echo_success('已创建本机主机')
         elif action == 'enable':
             if not options['u']:
                 self.echo_error('缺少参数')

@@ -59,21 +59,26 @@ class TransferView(View):
                     code, _ = ssh.exec_command_raw(f'[ -d {shlex.quote(path)} ]')
                     if code != 0:
                         return json_response(error='数据源路径必须为该主机上已存在的目录')
-                os.makedirs(base_dir)
-                with tempfile.NamedTemporaryFile(mode='w') as fp:
-                    fp.write(host.pkey or AppSetting.get('private_key'))
-                    fp.flush()
-                    target = f'{host.username}@{host.hostname}:{path}'
-                    command = ['sshfs', '-o', 'ro', '-o', f'ssh_command=ssh -p {host.port} -i {fp.name}', target, base_dir]
-                    try:
-                        task = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                    except FileNotFoundError:
-                        # 不经 shell 执行时缺少命令会直接抛异常，而不是返回 127
-                        remove_mount_dir(base_dir, False)
-                        return json_response(error='数据源为主机时需要在 Spug 服务端安装 sshfs')
-                    if task.returncode != 0:
-                        remove_mount_dir(base_dir)
-                        return json_response(error=task.stdout.decode())
+                if host.is_local:
+                    # 本机数据源直接从原目录同步，无需 sshfs 挂载；分发结束后不能清理该目录（见 _dispatch_sync）
+                    base_dir = path.rstrip('/') or '/'
+                else:
+                    os.makedirs(base_dir)
+                    with tempfile.NamedTemporaryFile(mode='w') as fp:
+                        fp.write(host.pkey or AppSetting.get('private_key'))
+                        fp.flush()
+                        target = f'{host.username}@{host.hostname}:{path}'
+                        command = ['sshfs', '-o', 'ro', '-o', f'ssh_command=ssh -p {host.port} -i {fp.name}', target,
+                                   base_dir]
+                        try:
+                            task = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        except FileNotFoundError:
+                            # 不经 shell 执行时缺少命令会直接抛异常，而不是返回 127
+                            remove_mount_dir(base_dir, False)
+                            return json_response(error='数据源为主机时需要在 Spug 服务端安装 sshfs')
+                        if task.returncode != 0:
+                            remove_mount_dir(base_dir)
+                            return json_response(error=task.stdout.decode())
             else:
                 os.makedirs(base_dir)
                 index = 0
@@ -124,7 +129,10 @@ def _dispatch_sync(task, language='zh'):
                     t.token,
                     json.dumps({'key': t.key, 'status': -1, 'data': f'\x1b[31mException: {exc}\x1b[0m'})
                 )
-    remove_mount_dir(task.src_dir, task.host_id)
+    # 只清理 TRANSFER_DIR 下的临时目录；本机数据源时 src_dir 是用户的原目录，绝不能删除
+    transfer_dir = os.path.realpath(settings.TRANSFER_DIR)
+    if os.path.realpath(task.src_dir).startswith(transfer_dir + os.sep):
+        remove_mount_dir(task.src_dir, task.host_id)
     close_old_connections()
 
 
@@ -138,8 +146,12 @@ def _do_sync(rds, task, host, language='zh'):
 
         flag = time.time()
         options = ['-azv', '--progress'] if task.host_id else ['-rzv', '--progress']
-        command = ['rsync', *options, '-h', '-e', f'ssh -p {host.port} -o StrictHostKeyChecking=no -i {fp.name}',
-                   f'{task.src_dir}/', f'{host.username}@{host.hostname}:{task.dst_dir}']
+        if host.is_local:
+            destination = [f'{task.src_dir}/', task.dst_dir]
+        else:
+            destination = ['-e', f'ssh -p {host.port} -o StrictHostKeyChecking=no -i {fp.name}',
+                           f'{task.src_dir}/', f'{host.username}@{host.hostname}:{task.dst_dir}']
+        command = ['rsync', *options, '-h', *destination]
         task = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         message = b''
         while True:

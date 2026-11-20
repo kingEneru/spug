@@ -337,24 +337,16 @@ class NodeExecutor:
         local_dir = os.path.join(settings.TRANSFER_DIR, uuid4().hex)
         try:
             host = Host.objects.get(pk=source.target)
-            os.makedirs(local_dir)
-            remote_dir = f'{host.username}@{host.hostname}:{source.path}'
-            with host.get_ssh() as ssh:
-                code, _ = ssh.exec_command_raw(f'[ -f {shlex.quote(source.path)} ]')
-            if code == 0:
-                remote_dir = f'{host.username}@{host.hostname}:{os.path.dirname(source.path)}'
-                local_path = os.path.join(local_dir, os.path.basename(source.path))
+            if host.is_local:
+                # 本机数据源直接使用原路径，无需 sshfs 挂载；local_dir 不会被创建，结束时的清理不会触及原路径
+                if os.path.isfile(source.path):
+                    local_path = source.path
+                elif os.path.isdir(source.path):
+                    local_path = source.path.rstrip('/') + '/'
+                else:
+                    raise Exception(f'数据源路径 {source.path} 不存在')
             else:
-                local_path = local_dir + '/'
-
-            with tempfile.NamedTemporaryFile(mode='w') as fp:
-                fp.write(host.pkey or AppSetting.get('private_key'))
-                fp.flush()
-
-                command = ['sshfs', '-o', 'ro', '-o', f'ssh_command=ssh -p {host.port} -i {fp.name}', remote_dir, local_dir]
-                task = subprocess.run(command, capture_output=True)
-                if task.returncode != 0:
-                    raise Exception(task.stderr.decode())
+                local_path = self._mount_source(host, source.path, local_dir)
         except Exception as e:
             remove_mount_dir(local_dir)
             for host_id in destination.targets:
@@ -373,6 +365,29 @@ class NodeExecutor:
         self.helper.send_status(node.id, state)
         self.run(node, state)
 
+    @staticmethod
+    def _mount_source(host, path, local_dir):
+        """把远程主机上的数据源以只读方式挂载到 local_dir，返回用于 rsync 的本地源路径"""
+        os.makedirs(local_dir)
+        remote_dir = f'{host.username}@{host.hostname}:{path}'
+        with host.get_ssh() as ssh:
+            code, _ = ssh.exec_command_raw(f'[ -f {shlex.quote(path)} ]')
+        if code == 0:
+            remote_dir = f'{host.username}@{host.hostname}:{os.path.dirname(path)}'
+            local_path = os.path.join(local_dir, os.path.basename(path))
+        else:
+            local_path = local_dir + '/'
+
+        with tempfile.NamedTemporaryFile(mode='w') as fp:
+            fp.write(host.pkey or AppSetting.get('private_key'))
+            fp.flush()
+
+            command = ['sshfs', '-o', 'ro', '-o', f'ssh_command=ssh -p {host.port} -i {fp.name}', remote_dir, local_dir]
+            task = subprocess.run(command, capture_output=True)
+            if task.returncode != 0:
+                raise Exception(task.stderr.decode())
+        return local_path
+
     def _data_transfer(self, node, host, local_path, remote_path):
         timestamp = time.time()
         key = f'{node.id}.{host.id}'
@@ -386,9 +401,12 @@ class NodeExecutor:
 
                 options = '-avz --progress -h'
                 # 命令交给控制端本地 bash 执行，路径来自节点配置，必须转义
-                argument = f'{shlex.quote(local_path)} {shlex.quote(f"{host.username}@{host.hostname}:{remote_path}")}'
-                ssh_command = shlex.quote(f'ssh -p {host.port} -o StrictHostKeyChecking=no -i {fp.name}')
-                command = f'rsync {options} -e {ssh_command} {argument}'
+                if host.is_local:
+                    command = f'rsync {options} {shlex.quote(local_path)} {shlex.quote(remote_path)}'
+                else:
+                    argument = f'{shlex.quote(local_path)} {shlex.quote(f"{host.username}@{host.hostname}:{remote_path}")}'
+                    ssh_command = shlex.quote(f'ssh -p {host.port} -o StrictHostKeyChecking=no -i {fp.name}')
+                    command = f'rsync {options} -e {ssh_command} {argument}'
                 with Executor() as et:
                     self.rds.set(pid_key, f'local.{et.pid}', 3600)
                     is_success = self.helper.local_exec(key, et, command)

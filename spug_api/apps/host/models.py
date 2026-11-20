@@ -6,6 +6,7 @@ from libs import ModelMixin, human_datetime
 from apps.account.models import User
 from apps.setting.utils import AppSetting
 from libs.ssh import SSH
+from libs.local_ssh import LocalSSH, is_local_hostname
 import json
 
 
@@ -24,7 +25,13 @@ class Host(models.Model, ModelMixin):
     def private_key(self):
         return self.pkey or AppSetting.get('private_key')
 
+    @property
+    def is_local(self):
+        return is_local_hostname(self.hostname)
+
     def get_ssh(self, pkey=None, default_env=None):
+        if self.is_local:
+            return LocalSSH(default_env=default_env)
         pkey = pkey or self.private_key
         return SSH(self.hostname, self.port, self.username, pkey, default_env=default_env)
 

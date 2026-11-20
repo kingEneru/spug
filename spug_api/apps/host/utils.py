@@ -6,12 +6,15 @@ from libs.helper import make_ali_request, make_tencent_request
 from libs.ssh import SSH, AuthenticationException
 from libs.utils import AttrDict, human_datetime
 from libs.validators import ip_validator
-from apps.host.models import HostExtend
+from libs.local_ssh import LOCAL_HOSTNAME
+from apps.host.models import Host, HostExtend, Group
+from apps.account.models import User
 from apps.setting.utils import AppSetting
 from collections import defaultdict
 from datetime import datetime, timezone
 from concurrent import futures
 import ipaddress
+import getpass
 import json
 import math
 import re
@@ -306,6 +309,9 @@ def batch_sync_host(token, hosts, password=None):
 
 def _sync_host_extend(host, private_key=None, public_key=None, password=None, ssh=None):
     if not ssh:
+        if host.is_local:
+            with host.get_ssh() as ssh:
+                return _sync_host_extend(host, ssh=ssh)
         kwargs = host.to_dict(selects=('hostname', 'port', 'username'))
         with _get_ssh(kwargs, host.pkey, private_key, public_key, password) as ssh:
             return _sync_host_extend(host, ssh=ssh)
@@ -334,3 +340,39 @@ def _get_ssh(kwargs, pkey=None, private_key=None, public_key=None, password=None
                 ssh.add_public_key(public_key)
             return _get_ssh(kwargs, private_key)
         raise e
+
+
+def ensure_local_host():
+    """
+    首次初始化时自动创建一条“本机”主机记录（主机地址为 LOCAL_HOSTNAME），选中它的操作都在 Spug 服务自身执行。
+    只创建一次：管理员删除后不会在下次启动时被重新创建。返回新建的主机，未创建时返回 None。
+    """
+    if AppSetting.get_default('local_host_inited'):
+        return None
+    if Host.objects.filter(hostname=LOCAL_HOSTNAME).exists():
+        AppSetting.set('local_host_inited', True)
+        return None
+    # 主机必须关联创建人，首次部署时 updatedb 早于创建管理员，届时由 user add 命令再次调用
+    user = User.objects.filter(is_supper=True, is_deleted=False).order_by('id').first()
+    if not user:
+        return None
+    name = '本机'
+    if Host.objects.filter(name=name).exists():
+        name = '本机(Spug)'
+    group = Group.objects.filter(name='本机', parent_id=0).first() or Group.objects.create(name='本机')
+    host = Host.objects.create(
+        name=name,
+        hostname=LOCAL_HOSTNAME,
+        port=0,
+        username=getpass.getuser(),
+        desc='Spug 服务自身所在的机器（容器/Pod），无需 SSH',
+        is_verified=True,
+        created_by=user,
+    )
+    host.groups.add(group)
+    AppSetting.set('local_host_inited', True)
+    try:
+        _sync_host_extend(host)
+    except Exception:
+        pass  # 主机信息采集按 Linux 编写，在 macOS 等环境可能不完整，不影响主机使用
+    return host

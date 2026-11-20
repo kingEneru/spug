@@ -14,4 +14,7 @@ class Command(BaseCommand):
         apps = [x.split('.')[-1] for x in settings.INSTALLED_APPS if x.startswith('apps.')]
         execute_from_command_line(args + apps)
         execute_from_command_line(['manage.py', 'migrate'])
+        from apps.host.utils import ensure_local_host
+        if ensure_local_host():
+            self.stdout.write(self.style.SUCCESS('已创建本机主机'))
         self.stdout.write(self.style.SUCCESS('初始化/更新成功'))
